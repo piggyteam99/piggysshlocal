@@ -5,7 +5,6 @@
 برای دانلود و اجرای اسکریپت، دستورات زیر را در ترمینال وارد کنید:
 
 ```bash
-sudo -i
 curl -fsSL https://raw.githubusercontent.com/piggyteam99/piggysshlocal/main/piggyssh.sh -o piggyssh.sh && chmod +x piggyssh.sh && ./piggyssh.sh
 
 ```
