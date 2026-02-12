@@ -1,25 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# ============================================================
-#  PIGGY TUNNEL MANAGER (Final Clean)
-#  - IRAN: builds SSH TUN (one-time password), auto installs sshpass,
-#          auto sets Piggy server.conf => 10.66.0.1:2222
-#  - FOREIGN: keeps tun0 up
-#  - Piggy monitor: forwards ports using ssh over tun (10.66.0.1:2222) with key
-#  - FOREIGN: has option to change MAIN ssh port + option to RESET everything
-#            (reset keeps main ssh port change intact)
-#
-#  NEW:
-#   1) command "piggyssh" opens this menu automatically
-#   2) Fix: IRAN local tun IP sometimes "disappears" because ssh -w may remove tun0
-#      when the ssh tunnel drops. We now CREATE tun0 persistently on IRAN
-#      (ExecStartPre) so it won't vanish, and we also re-apply IP/MTU more reliably.
-# ============================================================
-
-# -------------------------
-# Base paths (Piggy)
-# -------------------------
 BASE_DIR="/opt/piggy_tunnel"
 CONFIG_FILE="$BASE_DIR/server.conf"
 TUNNEL_LIST="$BASE_DIR/tunnels.list"
@@ -30,15 +11,9 @@ SERVICE_NAME="piggy-monitor"
 mkdir -p "$BASE_DIR"
 touch "$TUNNEL_LIST"
 
-# -------------------------
-# SSH options for port forwarding (Piggy)
-# -------------------------
 SSH_KEY="/root/.ssh/id_rsa"
 SSH_OPTS_COMMON="-N -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -o TCPKeepAlive=yes -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IPQoS=throughput"
 
-# -------------------------
-# TUN settings
-# -------------------------
 TUN_DIR="/opt/piggy_tun"
 mkdir -p "$TUN_DIR"
 TUN_CFG="$TUN_DIR/tun.conf"
@@ -50,16 +25,9 @@ TUN_DEV="tun0"
 TUN_FOREIGN_IP="10.66.0.1/30"
 TUN_IRAN_IP="10.66.0.2/30"
 TUN_MTU_DEFAULT="1400"
-
-# Separate SSHD on tun-only port (to avoid bot/noise on 22)
 TUN_SSH_PORT_DEFAULT="2222"
 
-# ============================================================
-# Helpers
-# ============================================================
-
 as_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]] || { echo "❌ لطفاً با root اجرا کن."; exit 1; }; }
-
 ensure_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 apt_install_if_needed() {
@@ -81,7 +49,6 @@ install_piggy_commands() {
     sleep 1
   fi
 
-  # keep backward compatibility with "piggy"
   if [ ! -L "/usr/local/bin/piggy" ] || [ "$(readlink -f /usr/local/bin/piggy 2>/dev/null || true)" != "$SCRIPT_PATH" ]; then
     ln -sf "$SCRIPT_PATH" /usr/local/bin/piggy
     chmod +x /usr/local/bin/piggy
@@ -97,10 +64,6 @@ log() {
 }
 
 pause() { read -p "Enter برای ادامه..."; }
-
-# ============================================================
-# Piggy: core tunnel mgmt
-# ============================================================
 
 kill_all_tunnel_processes() {
   pkill -f "ssh .* -L 0\.0\.0\.0:" >/dev/null 2>&1 || true
@@ -193,7 +156,6 @@ reset_tunnels() {
 }
 
 ensure_server_conf_or_autofill() {
-  # If server.conf missing but tun0 is up, auto-set to local tun endpoint
   if [[ ! -f "$CONFIG_FILE" ]] && ip link show "$TUN_DEV" >/dev/null 2>&1; then
     mkdir -p "$BASE_DIR"
     cat >"$CONFIG_FILE" <<EOF
@@ -229,7 +191,7 @@ EOF
 add_tunnel() {
   ensure_server_conf_or_autofill
   if [ ! -f "$CONFIG_FILE" ]; then
-    echo "❌ مقصد تنظیم نشده. (اگر SSH TUN ساختی، گزینه ساخت TUN خودش ست می‌کند)"
+    echo "❌ مقصد تنظیم نشده."
     pause
     return
   fi
@@ -253,10 +215,6 @@ add_tunnel() {
   pause
 }
 
-# ============================================================
-# Monitor (systemd) - starts/keeps SSH -L tunnels
-# ============================================================
-
 monitor_mode() {
   apt_install_if_needed iproute2 netcat-openbsd >/dev/null 2>&1 || true
   log "Piggy Monitor Started."
@@ -279,7 +237,6 @@ monitor_mode() {
     while IFS=: read -r lport rport; do
       [[ -z "$lport" ]] && continue
 
-      # check if local port is listening
       if ss -tln 2>/dev/null | grep -q ":${lport}\b"; then
         continue
       fi
@@ -299,10 +256,6 @@ monitor_mode() {
     sleep 2
   done
 }
-
-# ============================================================
-# SSH TUN (IRAN) - one-time password + create tun0
-# ============================================================
 
 tun_save_cfg() {
   cat > "$TUN_CFG" <<EOF
@@ -324,19 +277,11 @@ tun_load_cfg() {
 
 iran_setup_tun_and_autoconfig_piggy() {
   clear
-  echo "🔧 ساخت لینک لوکال (SSH TUN) ایران → خارج"
-  echo "----------------------------------------"
-  echo "✅ فقط یکبار پسورد می‌گیرد و کلید را نصب می‌کند."
-  echo "✅ بعدش Piggy را خودکار روی 10.66.0.1:${TUN_SSH_PORT_DEFAULT} ست می‌کند."
-  echo
-  echo "🔍 دلیل حذف شدن IP لوکال:"
-  echo "اگر ssh -w قطع شود، ممکن است tun0 توسط خود SSH حذف شود."
-  echo "✅ این اسکریپت الآن tun0 را قبل از اتصال به‌صورت دائمی می‌سازد تا دیگر حذف نشود."
-  echo
-
+  echo "🔧 ساخت SSH TUN ایران → خارج"
+  echo "----------------------------"
   tun_load_cfg
 
-  read -p "IP واقعی سرور خارج (مثلاً 194.x.x.x) [${REMOTE_HOST:-}]: " inp
+  read -p "IP واقعی سرور خارج [${REMOTE_HOST:-}]: " inp
   [[ -n "$inp" ]] && REMOTE_HOST="$inp"
   [[ -z "${REMOTE_HOST:-}" ]] && { echo "❌ IP خالی"; pause; return; }
 
@@ -345,7 +290,7 @@ iran_setup_tun_and_autoconfig_piggy() {
   [[ -n "$inp" ]] && SSH_PORT="$inp"
 
   TUN_MTU="${TUN_MTU:-$TUN_MTU_DEFAULT}"
-  read -p "MTU (Enter=پیشفرض ${TUN_MTU}) : " inp
+  read -p "MTU [${TUN_MTU}]: " inp
   [[ -n "$inp" ]] && TUN_MTU="$inp"
   TUN_MTU="${TUN_MTU:-$TUN_MTU_DEFAULT}"
 
@@ -373,10 +318,9 @@ iran_setup_tun_and_autoconfig_piggy() {
 
   tun_save_cfg
 
-  # Create/enable IRAN tun service (connects to REAL IP and makes tun0)
   cat >"/etc/systemd/system/${TUN_SVC_IRAN}.service" <<EOL
 [Unit]
-Description=Piggy SSH TUN (IRAN side) to ${REMOTE_HOST} - keep tun0 up (persistent tun0)
+Description=Piggy SSH TUN (IRAN) keep ${TUN_DEV} up
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -386,7 +330,6 @@ Type=simple
 Restart=always
 RestartSec=10
 
-# NEW: make tun0 persistent so it won't vanish if ssh drops
 ExecStartPre=/bin/bash -lc 'ip tuntap add dev ${TUN_DEV} mode tun 2>/dev/null || true; ip link set ${TUN_DEV} up 2>/dev/null || true; ip addr replace ${TUN_IRAN_IP} dev ${TUN_DEV} 2>/dev/null || true; ip link set ${TUN_DEV} mtu ${TUN_MTU} 2>/dev/null || true; true'
 
 ExecStart=/usr/bin/ssh -i ${SSH_KEY} -p ${SSH_PORT} \\
@@ -397,7 +340,6 @@ ExecStart=/usr/bin/ssh -i ${SSH_KEY} -p ${SSH_PORT} \\
   -w ${TUN_ID}:${TUN_ID} root@${REMOTE_HOST} \\
   "ip link set ${TUN_DEV} up; ip addr replace ${TUN_FOREIGN_IP} dev ${TUN_DEV}; ip link set ${TUN_DEV} mtu ${TUN_MTU}"
 
-# NEW: longer wait + re-apply local addr/mtu
 ExecStartPost=/bin/bash -lc 'for i in {1..80}; do ip link show ${TUN_DEV} >/dev/null 2>&1 && break; sleep 0.25; done; ip link set ${TUN_DEV} up 2>/dev/null || true; ip addr replace ${TUN_IRAN_IP} dev ${TUN_DEV} 2>/dev/null || true; ip link set ${TUN_DEV} mtu ${TUN_MTU} 2>/dev/null || true; true'
 
 [Install]
@@ -410,14 +352,13 @@ EOL
 
   echo "✅ سرویس TUN سمت ایران فعال شد."
 
-  # Auto set Piggy destination to tun-only ssh (10.66.0.1:2222)
   cat >"$CONFIG_FILE" <<EOF
 REMOTE_USER='root'
 REMOTE_IP='10.66.0.1'
 REMOTE_SSH_PORT='${TUN_SSH_PORT_DEFAULT}'
 EOF
 
-  echo "✅ Piggy auto-config شد: root@10.66.0.1:${TUN_SSH_PORT_DEFAULT}"
+  echo "✅ مقصد Piggy تنظیم شد: root@10.66.0.1:${TUN_SSH_PORT_DEFAULT}"
 
   if ! systemctl list-unit-files | grep -q "^${SERVICE_NAME}\.service"; then
     install_service
@@ -426,7 +367,7 @@ EOF
   fi
 
   echo
-  echo "تست SSH روی تون (باید OK بده):"
+  echo "تست:"
   echo "ssh -i /root/.ssh/id_rsa -p ${TUN_SSH_PORT_DEFAULT} root@10.66.0.1 \"echo OK\""
   echo
   pause
@@ -443,10 +384,6 @@ iran_tun_status() {
   systemctl status "$TUN_SVC_IRAN" --no-pager 2>/dev/null || true
   pause
 }
-
-# ============================================================
-# FOREIGN: keep tun0 up + tun-only sshd on 2222 + change main ssh port + reset
-# ============================================================
 
 foreign_prepare_sshd_for_tun() {
   apt_install_if_needed iproute2 openssh-server >/dev/null 2>&1 || true
@@ -476,7 +413,7 @@ foreign_install_tun_keepalive() {
 
   cat >"/etc/systemd/system/${TUN_SVC_FOREIGN}.service" <<EOL
 [Unit]
-Description=Piggy SSH TUN (FOREIGN side) - keep tun0 up
+Description=Piggy TUN (FOREIGN) keep ${TUN_DEV} up
 After=network-online.target
 Wants=network-online.target
 
@@ -500,8 +437,8 @@ EOL
 
 foreign_install_tun_only_sshd() {
   clear
-  echo "🛡️ ساخت SSH جدا فقط روی tun0 (10.66.0.1:${TUN_SSH_PORT_DEFAULT})"
-  echo "--------------------------------------------------------------"
+  echo "🛡️ SSH فقط روی tun0 (10.66.0.1:${TUN_SSH_PORT_DEFAULT})"
+  echo "-----------------------------------------------"
 
   local CFG="/etc/ssh/sshd_config_tun"
   local SVC="/etc/systemd/system/sshd-tun.service"
@@ -537,7 +474,7 @@ EOF
 
   cat >"$SVC" <<EOF
 [Unit]
-Description=OpenSSH server (TUN only) on 10.66.0.1:${TUN_SSH_PORT_DEFAULT}
+Description=OpenSSH (TUN only) 10.66.0.1:${TUN_SSH_PORT_DEFAULT}
 After=network-online.target
 Wants=network-online.target
 
@@ -562,9 +499,9 @@ EOF
 
 foreign_change_main_ssh_port() {
   clear
-  echo "🔁 تغییر پورت SSH اصلی سرور خارج (Public SSH)"
-  echo "--------------------------------------------"
-  echo "⚠️ اگر الان با SSH روی پورت فعلی وصل هستی، بعد از تغییر باید با پورت جدید وصل بشی."
+  echo "🔁 تغییر پورت SSH اصلی سرور خارج"
+  echo "--------------------------------"
+  echo "⚠️ بعد از تغییر، با پورت جدید وصل شو."
   echo
 
   local SSHD_CFG="/etc/ssh/sshd_config"
@@ -577,7 +514,7 @@ foreign_change_main_ssh_port() {
   ' "$SSHD_CFG" 2>/dev/null || true)"
   current_port="${current_port:-22}"
 
-  read -p "پورت جدید SSH (مثلاً 443) [فعلی: ${current_port}]: " new_port
+  read -p "پورت جدید [فعلی: ${current_port}]: " new_port
   new_port="${new_port:-$current_port}"
 
   if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
@@ -616,10 +553,7 @@ foreign_change_main_ssh_port() {
 
   echo
   echo "✅ انجام شد."
-  echo "پورت قبلی: ${current_port}"
-  echo "پورت جدید: ${new_port}"
-  echo
-  echo "برای اتصال از بیرون:"
+  echo "برای اتصال:"
   echo "ssh -p ${new_port} root@<SERVER_IP>"
   echo
   pause
@@ -627,16 +561,9 @@ foreign_change_main_ssh_port() {
 
 foreign_reset_all() {
   clear
-  echo "🧨 پاکسازی کامل (FOREIGN) — حذف همه کارهای انجام شده توسط اسکریپت"
-  echo "--------------------------------------------------------------"
-  echo "✅ این کارها انجام می‌شود:"
-  echo " - حذف سرویس piggy-tun-foreign و فایل systemd آن"
-  echo " - حذف سرویس sshd-tun و کانفیگ sshd_config_tun"
-  echo " - حذف اینترفیس tun0 (اگر ساخته شده)"
-  echo " - حذف پوشه‌ها و فایل‌های Piggy (/opt/piggy_tunnel و /opt/piggy_tun)"
-  echo " - تلاش برای برگرداندن برخی تغییرات PermitTunnel و ip_forward (best-effort)"
-  echo
-  echo "⚠️ تغییر پورت SSH اصلی (Public) دست نمی‌خورد."
+  echo "🧨 پاکسازی کامل (FOREIGN)"
+  echo "--------------------------"
+  echo "⚠️ تغییر پورت SSH اصلی دست نمی‌خورد."
   echo
   read -p "مطمئنی؟ (y/n): " confirm
   [[ "${confirm:-n}" != "y" ]] && return
@@ -649,7 +576,6 @@ foreign_reset_all() {
 
   rm -f "/etc/systemd/system/${TUN_SVC_FOREIGN}.service" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/sshd-tun.service" >/dev/null 2>&1 || true
-
   rm -f "/etc/ssh/sshd_config_tun" >/dev/null 2>&1 || true
 
   ip link set "${TUN_DEV}" down >/dev/null 2>&1 || true
@@ -671,14 +597,7 @@ foreign_reset_all() {
   systemctl daemon-reload >/dev/null 2>&1 || true
   systemctl restart sshd >/dev/null 2>&1 || systemctl restart ssh >/dev/null 2>&1 || true
 
-  echo
   echo "✅ پاکسازی انجام شد."
-  echo "ℹ️ پورت SSH اصلی تغییر داده نمی‌شود (همان چیزی که قبلاً گذاشتی باقی می‌ماند)."
-  echo
-  echo "تست وضعیت:"
-  echo "systemctl status ${TUN_SVC_FOREIGN} --no-pager || true"
-  echo "systemctl status sshd-tun --no-pager || true"
-  echo "ip a show ${TUN_DEV} || true"
   pause
 }
 
@@ -692,14 +611,9 @@ foreign_status() {
   echo
   systemctl status sshd-tun --no-pager 2>/dev/null || true
   echo
-  echo "🔎 پورت‌های شنونده SSH (نمای کلی):"
   ss -tlnp 2>/dev/null | grep -E 'sshd|:22\b|:443\b' || true
   pause
 }
-
-# ============================================================
-# Menus
-# ============================================================
 
 menu_iran() {
   while true; do
@@ -712,7 +626,7 @@ menu_iran() {
     echo "4) 📋 List Tunnels"
     echo "5) 📝 Logs"
     echo "6) 🚀 Install/Restart piggy-monitor"
-    echo "7) 🔧 ساخت SSH TUN + Auto-config Piggy روی 10.66.0.1:${TUN_SSH_PORT_DEFAULT}"
+    echo "7) 🔧 ساخت SSH TUN + ست خودکار مقصد (10.66.0.1:${TUN_SSH_PORT_DEFAULT})"
     echo "8) 📡 وضعیت TUN"
     echo "9) 🧹 Reset all tunnels"
     echo "0) خروج"
@@ -739,11 +653,11 @@ menu_foreign() {
     clear
     echo "🌍 PIGGY (FOREIGN) 🌍"
     echo "====================="
-    echo "1) ✅ آماده‌سازی SSH برای TUN (PermitTunnel)"
-    echo "2) 🧩 ساخت/فعال‌سازی tun0 (keepalive)"
-    echo "3) 🛡️ ساخت SSH جدا روی tun0 (10.66.0.1:${TUN_SSH_PORT_DEFAULT})"
-    echo "4) 🔁 تغییر پورت SSH اصلی (Public) مثل 22→443"
-    echo "5) 🧨 پاکسازی کامل (حذف همه کارهای اسکریپت بجز تغییر پورت SSH اصلی)"
+    echo "1) ✅ آماده‌سازی SSH برای TUN"
+    echo "2) 🧩 ساخت/فعال‌سازی tun0"
+    echo "3) 🛡️ SSH فقط روی tun0 (10.66.0.1:${TUN_SSH_PORT_DEFAULT})"
+    echo "4) 🔁 تغییر پورت SSH اصلی"
+    echo "5) 🧨 پاکسازی کامل (بجز پورت SSH اصلی)"
     echo "6) 📡 وضعیت"
     echo "0) خروج"
     echo "====================="
@@ -760,10 +674,6 @@ menu_foreign() {
     esac
   done
 }
-
-# ============================================================
-# Start
-# ============================================================
 
 as_root
 
