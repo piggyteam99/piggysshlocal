@@ -1,4 +1,3 @@
-```bash
 #!/bin/bash
 set -euo pipefail
 
@@ -612,7 +611,6 @@ foreign_status() {
   echo
   systemctl status sshd-tun --no-pager 2>/dev/null || true
   echo
-  echo "🔎 پورت‌های شنونده SSH (نمای کلی):"
   ss -tlnp 2>/dev/null | grep -E 'sshd|:22\b|:443\b' || true
   pause
 }
@@ -697,4 +695,3 @@ case "$role" in
   2) menu_foreign ;;
   *) echo "❌ انتخاب نامعتبر"; exit 1 ;;
 esac
-```
