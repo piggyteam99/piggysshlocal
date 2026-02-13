@@ -141,17 +141,64 @@ remove_tunnel() {
   pause
 }
 
-reset_tunnels() {
+reset_tunnels_only() {
   clear
-  echo "🧹 حذف همه تانل‌ها"
-  echo "------------------"
+  echo "🧹 حذف همه تانل‌ها (فقط Port Forward ها)"
+  echo "---------------------------------------"
   read -p "مطمئنی؟ (y/n): " confirm
   [[ "$confirm" != "y" ]] && return
   : > "$TUNNEL_LIST"
   kill_all_tunnel_processes
   restart_service
-  log "All tunnels reset by user."
+  log "All tunnels reset by user (tunnels only)."
   echo "✅ انجام شد."
+  pause
+}
+
+# ✅ NEW: پاکسازی کامل سمت ایران (همه چیز مربوط به این اسکریپت)
+iran_reset_all() {
+  clear
+  echo "🧨 پاکسازی کامل (IRAN)"
+  echo "----------------------"
+  echo "⚠️ همه چیز مربوط به این اسکریپت روی سرور ایران پاک می‌شود:"
+  echo "  - سرویس piggy-monitor"
+  echo "  - سرویس piggy-tun-iran"
+  echo "  - فایل‌ها و پوشه‌ها: $BASE_DIR و $TUN_DIR"
+  echo "  - اینترفیس ${TUN_DEV} (اگر وجود داشته باشد)"
+  echo "  - لینک‌های دستوری piggy/piggyssh"
+  echo
+  read -p "مطمئنی؟ (y/n): " confirm
+  [[ "${confirm:-n}" != "y" ]] && return
+
+  # stop/disable services
+  systemctl stop "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+  systemctl disable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+
+  systemctl stop "${TUN_SVC_IRAN}.service" >/dev/null 2>&1 || true
+  systemctl disable "${TUN_SVC_IRAN}.service" >/dev/null 2>&1 || true
+
+  # remove unit files
+  rm -f "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${TUN_SVC_IRAN}.service" >/dev/null 2>&1 || true
+
+  # kill forwards and any ssh -L
+  kill_all_tunnel_processes
+
+  # remove tun interface
+  ip link set "${TUN_DEV}" down >/dev/null 2>&1 || true
+  ip link del "${TUN_DEV}" >/dev/null 2>&1 || true
+
+  # remove piggy files
+  rm -rf "$BASE_DIR" >/dev/null 2>&1 || true
+  rm -rf "$TUN_DIR" >/dev/null 2>&1 || true
+
+  # remove installed commands (symlinks)
+  if [ -L /usr/local/bin/piggyssh ]; then rm -f /usr/local/bin/piggyssh >/dev/null 2>&1 || true; fi
+  if [ -L /usr/local/bin/piggy ]; then rm -f /usr/local/bin/piggy >/dev/null 2>&1 || true; fi
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  echo "✅ پاکسازی کامل ایران انجام شد."
   pause
 }
 
@@ -628,7 +675,8 @@ menu_iran() {
     echo "6) 🚀 Install/Restart piggy-monitor"
     echo "7) 🔧 ساخت SSH TUN + ست خودکار مقصد (10.66.0.1:${TUN_SSH_PORT_DEFAULT})"
     echo "8) 📡 وضعیت TUN"
-    echo "9) 🧹 Reset all tunnels"
+    echo "9) 🧨 پاکسازی کامل ایران (حذف همه چیز مربوط به اسکریپت)"
+    echo "10) 🧹 Reset all tunnels (فقط Port Forward ها)"
     echo "0) خروج"
     echo "=================="
     read -p "انتخاب: " c
@@ -641,7 +689,8 @@ menu_iran() {
       6) install_service; pause ;;
       7) iran_setup_tun_and_autoconfig_piggy ;;
       8) iran_tun_status ;;
-      9) reset_tunnels ;;
+      9) iran_reset_all ;;
+      10) reset_tunnels_only ;;
       0) exit 0 ;;
       *) echo "نامعتبر"; sleep 1 ;;
     esac
