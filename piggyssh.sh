@@ -8,19 +8,13 @@ LOG_FILE="$BASE_DIR/piggy.log"
 SCRIPT_PATH="$(realpath "$0")"
 SERVICE_NAME="piggy-monitor"
 
-mkdir -p "$BASE_DIR"
-touch "$TUNNEL_LIST"
-
 SSH_KEY="/root/.ssh/id_rsa"
 SSH_OPTS_COMMON="-N -o ServerAliveInterval=10 -o ServerAliveCountMax=6 -o ConnectTimeout=10 -o TCPKeepAlive=yes -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IPQoS=throughput"
 
 TUN_DIR="/opt/piggy_tun"
-mkdir -p "$TUN_DIR"
 TUN_CFG="$TUN_DIR/tun.conf"
 TUN_SVC_IRAN="piggy-tun-iran"
 
-# ✅ مهم: دیگه سمت خارج سرویس "tun0 ساز" نداریم (تداخل ایجاد می‌کرد)
-# فقط PermitTunnel + sshd-tun باقی میمونه
 TUN_DEV="tun0"
 TUN_ID="0"
 TUN_FOREIGN_IP="10.66.0.1/30"
@@ -34,6 +28,13 @@ WATCHDOG_TIMER="/etc/systemd/system/piggy-tun-watchdog.timer"
 
 as_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]] || { echo "❌ لطفاً با root اجرا کن."; exit 1; }; }
 ensure_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# ✅ NEW: ensure all dirs/files exist (prevents tun.conf errors forever)
+ensure_dirs() {
+  mkdir -p "$BASE_DIR" "$TUN_DIR" /root/.ssh
+  touch "$TUNNEL_LIST" "$LOG_FILE" 2>/dev/null || true
+  chmod 700 /root/.ssh 2>/dev/null || true
+}
 
 apt_install_if_needed() {
   export DEBIAN_FRONTEND=noninteractive
@@ -61,6 +62,7 @@ install_piggy_commands() {
 }
 
 log() {
+  ensure_dirs
   local max_lines=2000
   if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt "$max_lines" ]; then
     tail -n "$max_lines" "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
@@ -103,6 +105,7 @@ EOL
 }
 
 show_logs() {
+  ensure_dirs
   clear
   echo "📝 آخرین لاگ‌ها:"
   echo "----------------"
@@ -112,6 +115,7 @@ show_logs() {
 }
 
 list_tunnels() {
+  ensure_dirs
   clear
   echo "📋 لیست تانل‌ها"
   echo "--------------"
@@ -128,6 +132,7 @@ list_tunnels() {
 }
 
 remove_tunnel() {
+  ensure_dirs
   clear
   echo "➖ حذف تانل"
   echo "-----------"
@@ -147,6 +152,7 @@ remove_tunnel() {
 }
 
 reset_tunnels_only() {
+  ensure_dirs
   clear
   echo "🧹 حذف همه تانل‌ها (فقط Port Forward ها)"
   echo "---------------------------------------"
@@ -161,6 +167,7 @@ reset_tunnels_only() {
 }
 
 iran_reset_all() {
+  ensure_dirs
   clear
   echo "🧨 پاکسازی کامل (IRAN)"
   echo "----------------------"
@@ -207,8 +214,8 @@ iran_reset_all() {
 }
 
 ensure_server_conf_or_autofill() {
+  ensure_dirs
   if [[ ! -f "$CONFIG_FILE" ]] && ip link show "$TUN_DEV" >/dev/null 2>&1; then
-    mkdir -p "$BASE_DIR"
     cat >"$CONFIG_FILE" <<EOF
 REMOTE_USER='root'
 REMOTE_IP='10.66.0.1'
@@ -219,6 +226,7 @@ EOF
 }
 
 setup_server_manual() {
+  ensure_dirs
   clear
   echo "⚙️ تنظیم دستی مقصد (اختیاری)"
   echo "----------------------------"
@@ -267,11 +275,14 @@ add_tunnel() {
 }
 
 monitor_mode() {
+  ensure_dirs
   apt_install_if_needed iproute2 netcat-openbsd >/dev/null 2>&1 || true
   log "Piggy Monitor Started."
 
   while true; do
+    ensure_dirs
     if [ ! -f "$TUNNEL_LIST" ]; then sleep 5; continue; fi
+
     ensure_server_conf_or_autofill
     if [ ! -f "$CONFIG_FILE" ]; then sleep 5; continue; fi
 
@@ -281,6 +292,7 @@ monitor_mode() {
     REMOTE_USER="${REMOTE_USER:-root}"
     REMOTE_IP="${REMOTE_IP:-}"
     REMOTE_SSH_PORT="${REMOTE_SSH_PORT:-22}"
+
     [[ -z "$REMOTE_IP" ]] && { sleep 5; continue; }
 
     while IFS=: read -r lport rport; do
@@ -307,6 +319,8 @@ monitor_mode() {
 }
 
 tun_save_cfg() {
+  ensure_dirs
+  mkdir -p "$TUN_DIR"
   cat > "$TUN_CFG" <<EOF
 REMOTE_HOST='${REMOTE_HOST}'
 REMOTE_USER='root'
@@ -314,18 +328,20 @@ SSH_PORT='${SSH_PORT}'
 SSH_KEY='${SSH_KEY}'
 TUN_MTU='${TUN_MTU}'
 EOF
-  chmod 600 "$TUN_CFG"
+  chmod 600 "$TUN_CFG" 2>/dev/null || true
 }
 
 tun_load_cfg() {
+  ensure_dirs
+  mkdir -p "$TUN_DIR"
   if [[ -f "$TUN_CFG" ]]; then
     # shellcheck disable=SC1090
     source "$TUN_CFG" 2>/dev/null || true
   fi
 }
 
-# ✅ Watchdog: هر دقیقه اگر ping 10.66.0.1 fail شد => restart piggy-tun-iran
 enable_watchdog_iran() {
+  ensure_dirs
   mkdir -p /usr/local/sbin
 
   cat >"$WATCHDOG_SCRIPT" <<'EOF'
@@ -334,10 +350,8 @@ set -euo pipefail
 IP="10.66.0.1"
 SVC="piggy-tun-iran.service"
 
-# اگر سرویس اصلاً موجود نیست کاری نکن
 systemctl list-unit-files | grep -q "^piggy-tun-iran\.service" || exit 0
 
-# اگر پینگ قطع شد، ریستارت
 if ! ping -c 1 -W 1 "$IP" >/dev/null 2>&1; then
   systemctl restart "$SVC" >/dev/null 2>&1 || true
 fi
@@ -362,7 +376,7 @@ Description=Run Piggy TUN Watchdog every minute
 [Timer]
 OnBootSec=30
 OnUnitActiveSec=60
-Unit=$(basename "$WATCHDOG_SVC")
+Unit=piggy-tun-watchdog.service
 
 [Install]
 WantedBy=timers.target
@@ -370,11 +384,10 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now piggy-tun-watchdog.timer >/dev/null 2>&1 || true
-
-  echo "✅ Watchdog فعال شد (هر 60 ثانیه چک می‌کند)."
 }
 
 iran_setup_tun_and_autoconfig_piggy() {
+  ensure_dirs
   clear
   echo "🔧 ساخت SSH TUN ایران → خارج (پایدار + خودترمیم)"
   echo "----------------------------------------------"
@@ -396,7 +409,6 @@ iran_setup_tun_and_autoconfig_piggy() {
   apt_install_if_needed openssh-client sshpass iproute2 >/dev/null 2>&1 || true
   modprobe tun 2>/dev/null || true
 
-  mkdir -p /root/.ssh
   if [[ ! -f "$SSH_KEY" ]]; then
     echo "⚠️ ساخت کلید RSA..."
     ssh-keygen -t rsa -b 4096 -f "$SSH_KEY" -N "" -q
@@ -415,10 +427,8 @@ iran_setup_tun_and_autoconfig_piggy() {
      grep -qxF '$PUB_KEY' ~/.ssh/authorized_keys || echo '$PUB_KEY' >> ~/.ssh/authorized_keys"
 
   echo "✅ کلید نصب شد."
-
   tun_save_cfg
 
-  # ✅ تغییر مهم: قبل از هر استارت tun0 پاک میشه تا گیر/خرابی قبلی نده
   cat >"/etc/systemd/system/${TUN_SVC_IRAN}.service" <<EOL
 [Unit]
 Description=Piggy SSH TUN (IRAN) keep ${TUN_DEV} up
@@ -452,16 +462,11 @@ EOL
   systemctl enable --now "${TUN_SVC_IRAN}.service" >/dev/null 2>&1 || true
   systemctl restart "${TUN_SVC_IRAN}.service" >/dev/null 2>&1 || true
 
-  echo "✅ سرویس TUN سمت ایران فعال شد."
-
-  # ✅ مقصد Piggy برای port-forward ها از روی tun تنظیم میشه
   cat >"$CONFIG_FILE" <<EOF
 REMOTE_USER='root'
 REMOTE_IP='10.66.0.1'
 REMOTE_SSH_PORT='${TUN_SSH_PORT_DEFAULT}'
 EOF
-
-  echo "✅ مقصد Piggy تنظیم شد: root@10.66.0.1:${TUN_SSH_PORT_DEFAULT}"
 
   if ! systemctl list-unit-files | grep -q "^${SERVICE_NAME}\.service"; then
     install_service
@@ -469,18 +474,15 @@ EOF
     restart_service
   fi
 
-  # ✅ خودترمیم: فعال‌سازی watchdog
   enable_watchdog_iran
 
-  echo
-  echo "تست:"
-  echo "ping -c 2 10.66.0.1"
-  echo "ssh -i /root/.ssh/id_rsa -p ${TUN_SSH_PORT_DEFAULT} root@10.66.0.1 \"echo OK\""
-  echo
+  echo "✅ انجام شد."
+  echo "تست: ping -c 2 10.66.0.1"
   pause
 }
 
 iran_tun_status() {
+  ensure_dirs
   clear
   echo "📡 وضعیت TUN (ایران)"
   echo "---------------------"
@@ -511,9 +513,8 @@ foreign_prepare_sshd_for_tun() {
   echo "✅ PermitTunnel فعال شد."
 }
 
-# ✅ حذف شد: foreign_install_tun_keepalive (دیگه tun0 دستی نمی‌سازیم)
-
 foreign_install_tun_only_sshd() {
+  ensure_dirs
   clear
   echo "🛡️ SSH فقط روی tun0 (10.66.0.1:${TUN_SSH_PORT_DEFAULT})"
   echo "-----------------------------------------------"
@@ -576,6 +577,7 @@ EOF
 }
 
 foreign_change_main_ssh_port() {
+  ensure_dirs
   clear
   echo "🔁 تغییر پورت SSH اصلی سرور خارج"
   echo "--------------------------------"
@@ -638,6 +640,7 @@ foreign_change_main_ssh_port() {
 }
 
 foreign_reset_all() {
+  ensure_dirs
   clear
   echo "🧨 پاکسازی کامل (FOREIGN)"
   echo "--------------------------"
@@ -668,6 +671,7 @@ foreign_reset_all() {
 }
 
 foreign_status() {
+  ensure_dirs
   clear
   echo "📡 وضعیت خارج"
   echo "-------------"
@@ -692,7 +696,7 @@ menu_iran() {
     echo "6) 🚀 Install/Restart piggy-monitor"
     echo "7) 🔧 ساخت SSH TUN + ست خودکار مقصد + Watchdog (خودترمیم)"
     echo "8) 📡 وضعیت TUN + Watchdog"
-    echo "9) 🧨 پاکسازی کامل ایران (حذف همه چیز مربوط به اسکریپت)"
+    echo "9) 🧨 پاکسازی کامل ایران"
     echo "10) 🧹 Reset all tunnels (فقط Port Forward ها)"
     echo "0) خروج"
     echo "=================="
@@ -740,6 +744,7 @@ menu_foreign() {
 }
 
 as_root
+ensure_dirs
 
 if [[ "${1:-}" == "--monitor" ]]; then
   monitor_mode
