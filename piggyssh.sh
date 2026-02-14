@@ -27,6 +27,10 @@ IRAN_KEEP_SCRIPT="/usr/local/sbin/piggy-tun0-iran-keep"
 IRAN_KEEP_UNIT="/etc/systemd/system/piggy-tun0-iran-keep.service"
 IRAN_KEEP_SERVICE="piggy-tun0-iran-keep.service"
 
+# CLI command (NEW): piggyssh
+CLI_SCRIPT="/usr/local/sbin/piggyssh-manager"
+CLI_CMD="/usr/local/bin/piggyssh"
+
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo -e "${RED}✗ لطفاً با root اجرا کن (sudo -i)${NC}"
@@ -307,6 +311,22 @@ EOF
   echo -e "${GREEN}[+] فعال شد: ${unit_name}${NC}"
 }
 
+install_cli_piggyssh() {
+  echo -e "${YELLOW}[*] نصب دستور piggyssh (برای باز کردن منو)...${NC}"
+
+  # کپی اسکریپت فعلی به مسیر ثابت
+  install -m 0755 -D "$(realpath "$0")" "$CLI_SCRIPT"
+
+  # رَپر /usr/local/bin/piggyssh
+  cat >"$CLI_CMD" <<EOF
+#!/usr/bin/env bash
+exec "$CLI_SCRIPT" "\$@"
+EOF
+  chmod +x "$CLI_CMD"
+
+  echo -e "${GREEN}[+] دستور آماده شد: piggyssh${NC}"
+}
+
 show_status() {
   echo -e "${YELLOW}[*] Service status:${NC}"
   systemctl is-enabled "$SERVICE_NAME" >/dev/null 2>&1 && echo "enabled: yes" || echo "enabled: no"
@@ -346,6 +366,9 @@ full_remove() {
         "$FOREIGN_KEEP_SCRIPT" "$FOREIGN_KEEP_UNIT" \
         "$IRAN_KEEP_SCRIPT" "$IRAN_KEEP_UNIT" \
         "$LOG_FILE" "$AUTOSSH_LOG" >/dev/null 2>&1 || true
+
+  # remove piggyssh command
+  rm -f "$CLI_CMD" "$CLI_SCRIPT" >/dev/null 2>&1 || true
 
   rmdir "$CONF_DIR" >/dev/null 2>&1 || true
   systemctl daemon-reload || true
@@ -405,10 +428,14 @@ setup_ssh_tun() {
 
     install_keep_service_common "FOREIGN" "$FOREIGN_KEEP_SCRIPT" "$FOREIGN_KEEP_UNIT" "$FOREIGN_KEEP_SERVICE"
 
+    # install piggyssh command too
+    install_cli_piggyssh
+
     echo
     echo -e "${GREEN}[✓] تمام. (FOREIGN) keep-service نصب شد.${NC}"
     echo -e "${YELLOW}[*] تست:${NC} ping -c 3 ${LOCAL_TUN_IP}"
     echo -e "${YELLOW}[*] بعد از برقراری تونل از ایران:${NC} ping -c 3 ${PEER_TUN_IP}"
+    echo -e "${YELLOW}[*] منو با دستور زیر:${NC} piggyssh"
     return 0
   fi
 
@@ -434,10 +461,14 @@ setup_ssh_tun() {
   # NEW: IRAN keep-service (بعد ریبوت tun0 + IP همیشه برقرار)
   install_keep_service_common "IRAN" "$IRAN_KEEP_SCRIPT" "$IRAN_KEEP_UNIT" "$IRAN_KEEP_SERVICE"
 
+  # install piggyssh command too
+  install_cli_piggyssh
+
   echo
   echo -e "${GREEN}[✓] تمام. autossh + keep-service فعال شد.${NC}"
   echo -e "${YELLOW}[*] تست:${NC} ping -c 3 ${PEER_TUN_IP}"
   echo -e "${YELLOW}[*] لاگ autossh:${NC} tail -f ${AUTOSSH_LOG}"
+  echo -e "${YELLOW}[*] منو با دستور زیر:${NC} piggyssh"
 }
 
 menu() {
