@@ -22,12 +22,12 @@ FOREIGN_KEEP_SCRIPT="/usr/local/sbin/piggy-tun0-foreign-keep"
 FOREIGN_KEEP_UNIT="/etc/systemd/system/piggy-tun0-foreign-keep.service"
 FOREIGN_KEEP_SERVICE="piggy-tun0-foreign-keep.service"
 
-# IRAN watcher (NEW)
+# IRAN watcher
 IRAN_KEEP_SCRIPT="/usr/local/sbin/piggy-tun0-iran-keep"
 IRAN_KEEP_UNIT="/etc/systemd/system/piggy-tun0-iran-keep.service"
 IRAN_KEEP_SERVICE="piggy-tun0-iran-keep.service"
 
-# CLI command (NEW): piggyssh
+# CLI command: piggyssh
 CLI_SCRIPT="/usr/local/sbin/piggyssh-manager"
 CLI_CMD="/usr/local/bin/piggyssh"
 
@@ -67,6 +67,13 @@ ask_yes_no() {
     [[ "$ans" == "y" || "$ans" == "yes" ]] && { echo "y"; return 0; }
     [[ "$ans" == "n" || "$ans" == "no"  ]] && { echo "n"; return 0; }
   done
+}
+
+load_conf() {
+  [[ -f "$CONF_FILE" ]] || return 1
+  # shellcheck disable=SC1090
+  source "$CONF_FILE"
+  return 0
 }
 
 install_prereqs() {
@@ -117,12 +124,36 @@ pick_fast_cipher() {
   echo "chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes128-ctr"
 }
 
+make_key_tag() {
+  local local_public="${1:-unknown}"
+  echo "piggy-ssh-tun0-${local_public}"
+}
+
+ensure_dedicated_key() {
+  local key_path="$1"
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
+  if [[ ! -f "$key_path" ]]; then
+    echo -e "${YELLOW}[*] ساخت کلید اختصاصی Piggy برای این تونل: ${key_path}${NC}"
+    ssh-keygen -t ed25519 -N "" -f "$key_path" 2>&1 | tee -a "$LOG_FILE"
+  fi
+  chmod 600 "$key_path" 2>/dev/null || true
+  chmod 644 "${key_path}.pub" 2>/dev/null || true
+}
+
+cleanup_known_hosts_entry() {
+  local host="$1" port="$2"
+  ssh-keygen -R "$host" >/dev/null 2>&1 || true
+  ssh-keygen -R "[$host]:$port" >/dev/null 2>&1 || true
+}
+
 save_config() {
-  local ROLE="$1" LOCAL_PUBLIC="$2" REMOTE_HOST="$3" REMOTE_PORT="$4" REMOTE_USER="$5" BASE_NET="$6" LOCAL_CIDR="$7" PEER_IP="$8"
+  local ROLE="$1" LOCAL_PUBLIC="$2" PEER_PUBLIC="$3" REMOTE_HOST="$4" REMOTE_PORT="$5" REMOTE_USER="$6" BASE_NET="$7" LOCAL_CIDR="$8" PEER_IP="$9" KEY_PATH="${10}" KEY_TAG="${11}"
   mkdir -p "$CONF_DIR"
   cat >"$CONF_FILE" <<EOF
 ROLE="${ROLE}"
 LOCAL_PUBLIC="${LOCAL_PUBLIC}"
+PEER_PUBLIC="${PEER_PUBLIC}"
 REMOTE_HOST="${REMOTE_HOST}"
 REMOTE_PORT="${REMOTE_PORT}"
 REMOTE_USER="${REMOTE_USER}"
@@ -132,36 +163,33 @@ TUN_PEER_IP="${PEER_IP}"
 TUN_ID="${TUN_ID}"
 TUN_DEV="${TUN_DEV}"
 FAST_CIPHERS="$(pick_fast_cipher)"
+KEY_PATH="${KEY_PATH}"
+KEY_TAG="${KEY_TAG}"
 EOF
   chmod 600 "$CONF_FILE"
   echo -e "${GREEN}[+] کانفیگ ذخیره شد: ${CONF_FILE}${NC}"
 }
 
-ensure_ssh_key() {
-  mkdir -p /root/.ssh
-  chmod 700 /root/.ssh
-  if [[ ! -f /root/.ssh/id_rsa ]]; then
-    echo -e "${YELLOW}[*] ساخت SSH key...${NC}"
-    ssh-keygen -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa 2>&1 | tee -a "$LOG_FILE"
-  fi
-  chmod 600 /root/.ssh/id_rsa
-  chmod 644 /root/.ssh/id_rsa.pub
-}
-
 first_time_key_push_password() {
-  local remote_user="$1" remote_host="$2" remote_port="$3" remote_pass="$4"
-  ensure_ssh_key
+  local remote_user="$1" remote_host="$2" remote_port="$3" remote_pass="$4" key_path="$5" key_tag="$6"
+  ensure_dedicated_key "$key_path"
+
+  # prevent hostkey mismatch issues between old/new servers
+  cleanup_known_hosts_entry "$remote_host" "$remote_port"
 
   echo -e "${YELLOW}[*] بار اول: انتقال کلید با پسورد (sshpass) ...${NC}"
   sshpass -p "$remote_pass" ssh -p "$remote_port" -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile=/root/.ssh/known_hosts \
     "${remote_user}@${remote_host}" "echo OK" 2>&1 | tee -a "$LOG_FILE"
 
-  sshpass -p "$remote_pass" ssh-copy-id -p "$remote_port" \
-    -o StrictHostKeyChecking=accept-new \
+  # Add key with a clear tag so we can remove it later (from FOREIGN side)
+  local pub
+  pub="$(cat "${key_path}.pub")"
+  sshpass -p "$remote_pass" ssh -p "$remote_port" -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile=/root/.ssh/known_hosts \
-    -i /root/.ssh/id_rsa.pub \
-    "${remote_user}@${remote_host}" 2>&1 | tee -a "$LOG_FILE"
+    "${remote_user}@${remote_host}" \
+    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && grep -qF '${pub}' ~/.ssh/authorized_keys || echo '${pub} ${key_tag}' >> ~/.ssh/authorized_keys" \
+    2>&1 | tee -a "$LOG_FILE"
 
   echo -e "${GREEN}[+] کلید منتقل شد. از این به بعد بدون پسورد وصل میشه.${NC}"
 }
@@ -198,10 +226,11 @@ mkdir -p /dev/net 2>/dev/null || true
 [[ -c /dev/net/tun ]] || mknod /dev/net/tun c 10 200 2>/dev/null || true
 chmod 600 /dev/net/tun 2>/dev/null || true
 
-# keepalive + fast ciphers
+KEY_PATH="${KEY_PATH:-/root/.ssh/piggyssh_tun0_ed25519}"
+
 SSH_OPTS=(
   -p "$REMOTE_PORT"
-  -i /root/.ssh/id_rsa
+  -i "$KEY_PATH"
   -o BatchMode=yes
   -o StrictHostKeyChecking=accept-new
   -o UserKnownHostsFile=/root/.ssh/known_hosts
@@ -231,6 +260,7 @@ TUN_DEV="tun0"
 if ip link show "$TUN_DEV" >/dev/null 2>&1; then
   ip link set "$TUN_DEV" down || true
   ip tuntap del dev "$TUN_DEV" mode tun 2>/dev/null || true
+  ip link del "$TUN_DEV" 2>/dev/null || true
 fi
 EOF
 
@@ -314,10 +344,8 @@ EOF
 install_cli_piggyssh() {
   echo -e "${YELLOW}[*] نصب دستور piggyssh (برای باز کردن منو)...${NC}"
 
-  # کپی اسکریپت فعلی به مسیر ثابت
   install -m 0755 -D "$(realpath "$0")" "$CLI_SCRIPT"
 
-  # رَپر /usr/local/bin/piggyssh
   cat >"$CLI_CMD" <<EOF
 #!/usr/bin/env bash
 exec "$CLI_SCRIPT" "\$@"
@@ -325,6 +353,38 @@ EOF
   chmod +x "$CLI_CMD"
 
   echo -e "${GREEN}[+] دستور آماده شد: piggyssh${NC}"
+}
+
+cleanup_local_network_state() {
+  # Kill leftover autossh/ssh sessions for tun0
+  pkill -f "autossh.*-w ${TUN_ID}:${TUN_ID}" 2>/dev/null || true
+  pkill -f "ssh .* -w ${TUN_ID}:${TUN_ID}" 2>/dev/null || true
+
+  # Drop tun0 if exists
+  if ip link show "$TUN_DEV" >/dev/null 2>&1; then
+    ip link set "$TUN_DEV" down 2>/dev/null || true
+    ip tuntap del dev "$TUN_DEV" mode tun 2>/dev/null || true
+    ip link del "$TUN_DEV" 2>/dev/null || true
+  fi
+
+  # remove routes pointing to tun0 (best-effort)
+  ip route | awk '$0 ~ / dev tun0 / {print $1}' | while read -r r; do
+    [[ -n "$r" ]] && ip route del "$r" 2>/dev/null || true
+  done
+}
+
+# FOREIGN-only: remove piggy key lines from authorized_keys (uses KEY_TAG)
+foreign_remove_piggy_keys() {
+  local tag="${1:-}"
+  local ak="/root/.ssh/authorized_keys"
+  [[ -f "$ak" ]] || return 0
+  [[ -n "$tag" ]] || return 0
+
+  cp -a "$ak" "${ak}.bak.$(date +%F_%H%M%S)" 2>/dev/null || true
+  # delete any line containing our tag (safe & targeted)
+  grep -vF "$tag" "$ak" > "${ak}.tmp" 2>/dev/null || true
+  mv -f "${ak}.tmp" "$ak" 2>/dev/null || true
+  chmod 600 "$ak" 2>/dev/null || true
 }
 
 show_status() {
@@ -353,26 +413,46 @@ show_status() {
   tail -n 30 "$AUTOSSH_LOG" 2>/dev/null | sed 's/^/  /' || true
 }
 
-full_remove() {
-  echo -e "${RED}⚠️ حذف کامل: سرویس‌ها + فایل‌ها پاک می‌شود.${NC}"
+full_remove_local() {
+  echo -e "${RED}⚠️ حذف کامل لوکال: سرویس‌ها + فایل‌ها + tun0 + پروسس‌ها پاک می‌شود.${NC}"
   local ok; ok="$(ask_yes_no "مطمئنی؟")"
   [[ "$ok" == "n" ]] && { echo "لغو شد."; return 0; }
+
+  local had_conf="n"
+  if load_conf; then had_conf="y"; fi
 
   systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$FOREIGN_KEEP_SERVICE" >/dev/null 2>&1 || true
   systemctl disable --now "$IRAN_KEEP_SERVICE" >/dev/null 2>&1 || true
+
+  cleanup_local_network_state
+
+  # Role-specific cleanup
+  if [[ "$had_conf" == "y" ]]; then
+    if [[ "${ROLE:-}" == "IRAN" ]]; then
+      # IRAN: cleanup known_hosts for last remote + delete dedicated key
+      if [[ -n "${REMOTE_HOST:-}" && -n "${REMOTE_PORT:-}" ]]; then
+        cleanup_known_hosts_entry "$REMOTE_HOST" "$REMOTE_PORT"
+      fi
+      if [[ -n "${KEY_PATH:-}" ]]; then
+        rm -f "$KEY_PATH" "${KEY_PATH}.pub" >/dev/null 2>&1 || true
+      fi
+    else
+      # FOREIGN: remove tagged piggy key line(s) from authorized_keys
+      foreign_remove_piggy_keys "${KEY_TAG:-}"
+    fi
+  fi
 
   rm -f "$UNIT_FILE" "$UP_SCRIPT" "$DOWN_SCRIPT" "$SYSCTL_FILE" "$CONF_FILE" \
         "$FOREIGN_KEEP_SCRIPT" "$FOREIGN_KEEP_UNIT" \
         "$IRAN_KEEP_SCRIPT" "$IRAN_KEEP_UNIT" \
         "$LOG_FILE" "$AUTOSSH_LOG" >/dev/null 2>&1 || true
 
-  # remove piggyssh command
   rm -f "$CLI_CMD" "$CLI_SCRIPT" >/dev/null 2>&1 || true
 
   rmdir "$CONF_DIR" >/dev/null 2>&1 || true
-  systemctl daemon-reload || true
-  echo -e "${GREEN}[✓] حذف کامل انجام شد.${NC}"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo -e "${GREEN}[✓] حذف کامل لوکال انجام شد.${NC}"
 }
 
 setup_ssh_tun() {
@@ -396,11 +476,11 @@ setup_ssh_tun() {
   local LOCAL_PUBLIC
   LOCAL_PUBLIC="$(read_nonempty "LOCAL public IP (IP عمومی همین سرور): ")"
 
-  local REMOTE_PUBLIC
-  REMOTE_PUBLIC="$(read_nonempty "REMOTE public IP (IP عمومی سرور مقابل): ")"
+  local PEER_PUBLIC
+  PEER_PUBLIC="$(read_nonempty "PEER public IP (IP عمومی سرور مقابل): ")"
 
   local BASE_NET
-  BASE_NET="$(gen_auto_subnet_30 "$LOCAL_PUBLIC" "$REMOTE_PUBLIC")"
+  BASE_NET="$(gen_auto_subnet_30 "$LOCAL_PUBLIC" "$PEER_PUBLIC")"
 
   local LOCAL_TUN_IP="" PEER_TUN_IP=""
   if [[ "$ROLE" == "IRAN" ]]; then
@@ -418,17 +498,19 @@ setup_ssh_tun() {
   echo -e "${GREEN}[AUTO] IP این سرور: ${LOCAL_TUN_IP}/30${NC}"
   echo -e "${GREEN}[AUTO] IP سرور مقابل: ${PEER_TUN_IP}${NC}"
 
+  local KEY_PATH="/root/.ssh/piggyssh_tun0_ed25519"
+  local KEY_TAG
+  KEY_TAG="$(make_key_tag "$LOCAL_PUBLIC")"
+
   if [[ "$ROLE" == "FOREIGN" ]]; then
     echo
     local do_fix
     do_fix="$(ask_yes_no "PermitTunnel yes رو ست کنم و sshd رو ریستارت کنم؟")"
     [[ "$do_fix" == "y" ]] && ensure_remote_permit_tunnel
 
-    save_config "$ROLE" "$LOCAL_PUBLIC" "0.0.0.0" "22" "root" "$BASE_NET" "$LOCAL_CIDR" "$PEER_TUN_IP"
+    save_config "$ROLE" "$LOCAL_PUBLIC" "$PEER_PUBLIC" "0.0.0.0" "22" "root" "$BASE_NET" "$LOCAL_CIDR" "$PEER_TUN_IP" "$KEY_PATH" "$KEY_TAG"
 
     install_keep_service_common "FOREIGN" "$FOREIGN_KEEP_SCRIPT" "$FOREIGN_KEEP_UNIT" "$FOREIGN_KEEP_SERVICE"
-
-    # install piggyssh command too
     install_cli_piggyssh
 
     echo
@@ -436,6 +518,7 @@ setup_ssh_tun() {
     echo -e "${YELLOW}[*] تست:${NC} ping -c 3 ${LOCAL_TUN_IP}"
     echo -e "${YELLOW}[*] بعد از برقراری تونل از ایران:${NC} ping -c 3 ${PEER_TUN_IP}"
     echo -e "${YELLOW}[*] منو با دستور زیر:${NC} piggyssh"
+    echo -e "${YELLOW}[*] نکته پیشگیری:${NC} مطمئن شو فایروال (ufw/nft) پورت SSH مقصدت رو برای IP ایران جدید باز گذاشته."
     return 0
   fi
 
@@ -452,16 +535,13 @@ setup_ssh_tun() {
   local REMOTE_PASS
   REMOTE_PASS="$(read_nonempty "Password برای بار اول (${REMOTE_USER}@${REMOTE_HOST}): ")"
 
-  first_time_key_push_password "$REMOTE_USER" "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_PASS"
-  save_config "$ROLE" "$LOCAL_PUBLIC" "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_USER" "$BASE_NET" "$LOCAL_CIDR" "$PEER_TUN_IP"
+  first_time_key_push_password "$REMOTE_USER" "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_PASS" "$KEY_PATH" "$KEY_TAG"
+  save_config "$ROLE" "$LOCAL_PUBLIC" "$PEER_PUBLIC" "$REMOTE_HOST" "$REMOTE_PORT" "$REMOTE_USER" "$BASE_NET" "$LOCAL_CIDR" "$PEER_TUN_IP" "$KEY_PATH" "$KEY_TAG"
 
   write_up_down_scripts
   write_systemd_unit
 
-  # NEW: IRAN keep-service (بعد ریبوت tun0 + IP همیشه برقرار)
   install_keep_service_common "IRAN" "$IRAN_KEEP_SCRIPT" "$IRAN_KEEP_UNIT" "$IRAN_KEEP_SERVICE"
-
-  # install piggyssh command too
   install_cli_piggyssh
 
   echo
@@ -477,13 +557,13 @@ menu() {
     echo -e "${GREEN}=== PIGGY SSH-TUN MANAGER (tun0 over autossh) ===${NC}"
     echo "1) Setup / Reconfigure"
     echo "2) Status"
-    echo -e "${RED}3) Full Remove${NC}"
+    echo -e "${RED}3) Full Remove (Local - role aware)${NC}"
     echo "4) Exit"
     read -r -p "Choose [1-4]: " c
     case "$c" in
       1) setup_ssh_tun ;;
       2) show_status ;;
-      3) full_remove ;;
+      3) full_remove_local ;;
       4) exit 0 ;;
       *) echo "Invalid." ;;
     esac
